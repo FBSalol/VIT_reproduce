@@ -37,7 +37,7 @@ class PatchEmbed(nn.Module):
         self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
         self.num_patches = self.grid_size[0] * self.grid_size[1]# patch数量
         # 获得patch
-        self.patch_proj = nn.Conv2d(
+        self.proj = nn.Conv2d(
             in_channels=in_channels,
             out_channels=embed_dim,
             kernel_size=patch_size,
@@ -50,7 +50,7 @@ class PatchEmbed(nn.Module):
         B, C, H, W = x.shape
         assert (H, W) == self.img_size, f"Input image size must be {self.img_size}, but got {(H, W)}"
         
-        x = self.patch_proj(x) # (B, embed_dim, grid_size[0], grid_size[1])
+        x = self.proj(x) # (B, embed_dim, grid_size[0], grid_size[1])
         # x.flatten(2)：将每个 patch 的空间位置展平成一个序列，shape 变为 (B, embed_dim, num_patches)
         # .transpose(1, 2)：交换通道和 patch 维度，变为 (B, num_patches, embed_dim)，即每一行是一个 patch 的向量。
         x = x.flatten(2).transpose(1, 2)
@@ -74,17 +74,17 @@ class Attention(nn.Module):
         assert self.head_dim * num_heads == embed_dim, "注意力头数和嵌入维度不匹配"
 
         self.scaling = qk_scale if qk_scale is not None else self.head_dim ** -0.5 # 对点积结果进行缩放，保证数值稳定
-        self.qkv_proj = nn.Linear(embed_dim, embed_dim * 3, bias=qkv_bias) # 线性变换，将输入映射到查询、键、值三个向量
+        self.qkv = nn.Linear(embed_dim, embed_dim * 3, bias=qkv_bias) # 线性变换，将输入映射到查询、键、值三个向量
         self.attn_drop = nn.Dropout(attn_dropout)
-        self.out_proj = nn.Linear(embed_dim, embed_dim) # 模型重新融合和变换各个头的信息
+        self.proj = nn.Linear(embed_dim, embed_dim) # 模型重新融合和变换各个头的信息
         self.out_drop = nn.Dropout(out_dropout)
 
     def forward(self, x):
         B, N, C = x.shape # [batch_size, num_patches + 1, embed_dim] 加了一个分类 token
-        # qkv_proj(): -> [batch_size, num_patches + 1, 3 * embed_dim]
+        # qkv(): -> [batch_size, num_patches + 1, 3 * embed_dim]
         # reshape: -> [batch_size, num_patches + 1, 3, num_heads, head_dim]
         # permute: -> [3, batch_size, num_heads, num_patches + 1, head_dim] 调整维度顺序
-        qkv = self.qkv_proj(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         # qkv[0] 是 Q，qkv[1] 是 K，qkv[2] 是 V，形状都是 (batch_size, num_heads, num_patches + 1, head_dim)。
         q, k, v = qkv[0], qkv[1], qkv[2]
 
@@ -98,7 +98,7 @@ class Attention(nn.Module):
         # transpose: -> [batch_size, num_patches + 1, num_heads, head_dim]
         # reshape: -> [batch_size, num_patches + 1, embed_dim]
         out = (attn_weights @ v).transpose(1, 2).reshape(B, N, C)
-        out = self.out_proj(out)
+        out = self.proj(out)
         out = self.out_drop(out)
         return out   
     
@@ -177,20 +177,22 @@ class VisionTransformer(nn.Module):
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # 生成drop path的比例，通常越深的层drop path概率越大
 
-        self.blocks = nn.Sequential([
-            Block(
-                embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                qk_scale=qk_scale,
-                drop=drop_rate,
-                attn_drop=attn_drop_rate,
-                drop_path=dpr[i],
-                norm_layer=norm_layer,
-                act_layer=act_layer
-            ) for i in range(depth)
-        ])
+        self.blocks = nn.Sequential(
+            *[
+                Block(
+                    embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    qk_scale=qk_scale,
+                    drop=drop_rate,
+                    attn_drop=attn_drop_rate,
+                    drop_path=dpr[i],
+                    norm_layer=norm_layer,
+                    act_layer=act_layer
+                ) for i in range(depth)
+            ]
+        )
         
         # 如果指定了representation_size，则在最后一层添加一个线性层用于输出
         if representation_size is not None:
